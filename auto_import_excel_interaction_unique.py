@@ -93,11 +93,21 @@ def read_file_txt(txt_location, file_name, truncate=False):
         print(f"File: [{file_name}] Sukses Import Txt.")
 
         # ========== Proses Interaksi Unique ==========
+        # Proses ini mengambil semua data dari tabel bulan berjalan,
+        # lalu menentukan baris interaksi unik berdasarkan kombinasi msisdn + tanggal (update_date),
+        # dengan urutan prioritas topik yang sudah dikelompokkan dalam SERVICE_DETAIL dan PRIORITY.
+        
         cursor = conn.cursor(dictionary=True)
         cursor.execute(f"SELECT * FROM {table_interaction}")
         rows = cursor.fetchall()
         if rows:
             df_all = pd.DataFrame(rows)
+            print("✅ Jumlah total baris awal:", len(df_all))
+            # Hitung jumlah baris unik berdasarkan kombinasi msisdn dan tanggal (berarti bisa lebih dari 1 per bulan)
+            print("✅ Jumlah nilai msisdn unik (berdasarkan tanggal):", df_all['msisdn'].nunique())
+            # Ambil hanya bagian tanggal dari update_stamp (tanpa waktu) untuk digunakan sebagai dasar pengelompokan harian
+            df_all['update_date'] = pd.to_datetime(df_all['update_stamp'], errors='coerce').dt.date
+
 
             topic_to_service_detail = {
                 "P11-Permintaan Pasang Baru Telkomsel Halo": "P1",
@@ -133,7 +143,10 @@ def read_file_txt(txt_location, file_name, truncate=False):
                 "P44-Permintaan pembayaran tagihan": "P44"
             }
             priority_order = {'P1': 1, 'P44': 2, 'P2': 3, 'P': 4, 'K': 5, 'O': 6, 'I': 7, 'C': 8}
-
+            # Mapping topic_result ke SERVICE_DETAIL berdasarkan kamus topic_to_service_detail
+            # Jika tidak ditemukan, fallback ke nilai 'service' dari kolom data
+            # Kemudian dari SERVICE_DETAIL diekstrak prefix huruf (misal: P1, P44, P) lalu dipetakan ke PRIORITY
+            # Tujuannya untuk mengurutkan interaksi agar yang prioritas tinggi diproses lebih dulu saat pengambilan unique
             df_all['SERVICE_DETAIL'] = df_all['topic_result'].map(topic_to_service_detail)
             df_all['SERVICE_DETAIL'] = df_all['SERVICE_DETAIL'].fillna(df_all['service']).astype(str)
             df_all['PRIORITY'] = df_all['SERVICE_DETAIL'].str.extract(r'^([A-Z]+\d*)')[0].map(
@@ -141,10 +154,15 @@ def read_file_txt(txt_location, file_name, truncate=False):
             )
 
             df_sorted = df_all.sort_values(by='PRIORITY')
-            df_unique = df_sorted.drop_duplicates(subset='msisdn', keep='first')
+            df_sorted['update_date'] = df_sorted['update_stamp'].dt.date
+            # Ambil satu interaksi unik per msisdn per hari berdasarkan update_date
+            # Jika ingin hanya satu interaksi per msisdn per bulan, cukup gunakan subset=['msisdn']
+            df_unique = df_sorted.drop_duplicates(subset=['msisdn', 'update_date'], keep='first')
 
             unique_table = f"ccap_t_interaction_unique_{tahun}{str(bulan).zfill(2)}"
-            cols = [col for col in df_unique.columns if col not in ['SERVICE_DETAIL', 'PRIORITY']]
+            cursor.execute(f"TRUNCATE TABLE {unique_table}")
+            conn.commit()
+            cols = [col for col in df_unique.columns if col not in ['id', 'SERVICE_DETAIL', 'PRIORITY', 'update_date']]
             placeholders = ", ".join(["%s"] * len(cols))
             insert_stmt = f"INSERT INTO {unique_table} ({', '.join(cols)}) VALUES ({placeholders})"
 
